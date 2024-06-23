@@ -1,6 +1,7 @@
 import io
 import sys
 import uuid
+import hashlib
 import types
 import marshal
 import logging
@@ -166,7 +167,7 @@ class ODImporter(object):
         Import meta hook class which contains required find_module and load_module functions.
         This can be added to sys.meta_path via the add_remote_source function
     Args:
-        url: String which contains target url to import packages from
+        source: String which contains target url to import packages from or raw bytes of an archive
         INSECURE: boolean which allows unencrypted protocols to be used
         ignores: list of packages to ignore imports for
         excludes: list of packages to exclude imports of
@@ -174,12 +175,11 @@ class ODImporter(object):
         config: dictionary of configurations for the protocol handler
     """
 
-    def __init__(self, url: str, INSECURE: bool=False, ignores: list=None, excludes: list=[], zip_password: bytes=None, config={}):
+    def __init__(self, source: str, INSECURE: bool=False, ignores: list=None, excludes: list=[], zip_password: bytes=None, config={}):
         self.raw_python_import = raw_python_import
         self.uuid = str(uuid.uuid4().int)
         self.unique_proto_handler = 'proto_handler_' + self.uuid
         self.unique_proto_config = 'proto_config_' + self.uuid
-        self.url = url.rstrip("/")
         self.modules = {}
         self.config = imp_config(**config)
         self.INSECURE = INSECURE
@@ -189,26 +189,31 @@ class ODImporter(object):
         self.excludes = excludes
         self.ignores = ignores if ignores is not None else []
         hooks.init_finder(self)
-        self.proto_handler, secure = self.protocol_resolver(self.url)
-        sys.modules[self.unique_proto_handler] = self.proto_handler
-        sys.modules[self.unique_proto_config] = self.config
         if isinstance(zip_password, str):
             self.zip_password = bytes(zip_password, 'utf-8')
         elif isinstance(zip_password, bytes) or zip_password is None:
             self.zip_password = zip_password
         else:
             raise ValueError("[-] zip_password must be one of String, Bytes, or None")
-        if not secure and not self.INSECURE:
-            raise ImportError("[-] Insecure protocol used without setting INSECURE")
-        resp = self.proto_handler(self.url, path_cache=self.path_cache, config=self.config)
+        if isinstance(source, bytes):
+            self.source = hashlib.md5(source).hexdigest()
+            data = source
+        else:
+            self.source = source.rstrip("/")
+            self.proto_handler, secure = self.protocol_resolver(self.source)
+            sys.modules[self.unique_proto_handler] = self.proto_handler
+            sys.modules[self.unique_proto_config] = self.config
+            if not secure and not self.INSECURE:
+                raise ImportError("[-] Insecure protocol used without setting INSECURE")
+            data = self.proto_handler(self.source, path_cache=self.path_cache, config=self.config)
         # Check if file is a zip
-        if resp.startswith(b'\x50\x4b\x03\x04'):
-            archive_handler = archive_handlers['zip']()(resp, self.url, self.path_cache, pwd=self.zip_password)
+        if data.startswith(b'\x50\x4b\x03\x04'):
+            archive_handler = archive_handlers['zip']()(data, self.source, self.path_cache, pwd=self.zip_password)
             self.path_cache = archive_handler.path_cache
             self.proto_handler = archive_handler.extractor
         # Check if file is a tar or tgz
-        elif resp.startswith(b'\x1f\x8b') or (len(resp) > 260 and resp[257:].startswith(b"ustar")):
-            archive_handler = archive_handlers['tar']()(resp, self.url, self.path_cache)
+        elif data.startswith(b'\x1f\x8b') or (len(data) > 260 and data[257:].startswith(b"ustar")):
+            archive_handler = archive_handlers['tar']()(data, self.source, self.path_cache)
             self.path_cache = archive_handler.path_cache
             self.proto_handler = archive_handler.extractor
 
@@ -293,8 +298,8 @@ class ODImporter(object):
                         if mods:
                             if path + ".py" in mods:
                                 self.modules[fullname] = {}
-                                self.modules[fullname]['content'] = self.proto_handler(self.url + "/" + path + ".py", path_cache=self.path_cache, config=self.config)
-                                self.modules[fullname]['filepath'] = self.url + "/" + path + ".py"
+                                self.modules[fullname]['content'] = self.proto_handler(self.source + "/" + path + ".py", path_cache=self.path_cache, config=self.config)
+                                self.modules[fullname]['filepath'] = self.source + "/" + path + ".py"
                                 self.modules[fullname]['package'] = False
                                 self.modules[fullname]['cExtension'] = False
                                 package_spec.origin = self.modules[fullname]['filepath']
@@ -302,32 +307,32 @@ class ODImporter(object):
                                 return package_spec
                             elif cExtensionImport and c_mods: # or mod.endswith('.so')): #not currently supporting *nix
                                 self.modules[fullname] = {}
-                                self.modules[fullname]['content'] = self.proto_handler(self.url + "/" + c_mods[0], path_cache=self.path_cache, config=self.config)
-                                self.modules[fullname]['filepath'] = self.url + "/" + c_mods[0]
+                                self.modules[fullname]['content'] = self.proto_handler(self.source + "/" + c_mods[0], path_cache=self.path_cache, config=self.config)
+                                self.modules[fullname]['filepath'] = self.source + "/" + c_mods[0]
                                 self.modules[fullname]['package'] = False
                                 self.modules[fullname]['cExtension'] = True
-                                package_spec = _frozen_importlib.ModuleSpec(fullname, self, origin=self.url + "/" + c_mods[0], is_package=False)
+                                package_spec = _frozen_importlib.ModuleSpec(fullname, self, origin=self.source + "/" + c_mods[0], is_package=False)
                                 return package_spec
                             elif path + "/" in mods:
                                 # Let's try to update the cache
-                                self.proto_handler(self.url, path=path + "/", path_cache=self.path_cache, config=self.config)
+                                self.proto_handler(self.source, path=path + "/", path_cache=self.path_cache, config=self.config)
                                 if path + "/__init__.py" in self.path_cache:
                                     self.modules[fullname] = {}
-                                    self.modules[fullname]['content'] = self.proto_handler(self.url + "/" + path + "/__init__.py", path_cache=self.path_cache, config=self.config)
-                                    self.modules[fullname]['filepath'] = self.url + "/" + path + "/__init__.py"
+                                    self.modules[fullname]['content'] = self.proto_handler(self.source + "/" + path + "/__init__.py", path_cache=self.path_cache, config=self.config)
+                                    self.modules[fullname]['filepath'] = self.source + "/" + path + "/__init__.py"
                                     self.modules[fullname]['package'] = True
                                     self.modules[fullname]['cExtension'] = False
-                                    package_spec.origin = self.url + "/" + path + "/__init__.py"
-                                    package_spec.submodule_search_locations = [self.url + "/" + path]
+                                    package_spec.origin = self.source + "/" + path + "/__init__.py"
+                                    package_spec.submodule_search_locations = [self.source + "/" + path]
                                     package_spec.has_location = True
                                     return package_spec
                             elif path + ".pyc" in mods:
                                 self.modules[fullname] = {}
-                                self.modules[fullname]['content'] = self.proto_handler(self.url + "/" + pyc_mods[0], path_cache=self.path_cache, config=self.config)
-                                self.modules[fullname]['filepath'] = self.url + "/" + pyc_mods[0]
+                                self.modules[fullname]['content'] = self.proto_handler(self.source + "/" + pyc_mods[0], path_cache=self.path_cache, config=self.config)
+                                self.modules[fullname]['filepath'] = self.source + "/" + pyc_mods[0]
                                 self.modules[fullname]['package'] = False
                                 self.modules[fullname]['cExtension'] = False
-                                package_spec.origin = self.url + "/" + pyc_mods[0]
+                                package_spec.origin = self.source + "/" + pyc_mods[0]
                                 package_spec.has_location = True
                                 return package_spec
                         if f"{path}/" in self.path_cache:
@@ -338,13 +343,13 @@ class ODImporter(object):
                             self.modules[fullname]['package'] = True
                             self.modules[fullname]['cExtension'] = False
                             package_spec.origin = None
-                            package_spec.submodule_search_locations = [self.url + "/" + path]
+                            package_spec.submodule_search_locations = [self.source + "/" + path]
                             package_spec.has_location = True
                             return package_spec
                     else:
                         if (("/".join(path.split("/")[:depth]) + "/" in self.path_cache) or ("/".join(path.split("/")[:depth]) in self.path_cache)):
                             # Try to update cache
-                            self.proto_handler(self.url, path="/".join(path.split("/")[:depth]) + "/", path_cache=self.path_cache, config=self.config)
+                            self.proto_handler(self.source, path="/".join(path.split("/")[:depth]) + "/", path_cache=self.path_cache, config=self.config)
                             if not [mod for mod in self.path_cache if mod.startswith("/".join(path.split("/")[:depth]))]:
                                 # the path couldn't be matched at the current depth
                                 logging.info("%s couldn't be matched at the current depth" % "/".join(path.split("/")[:depth]))
@@ -384,10 +389,10 @@ class ODImporter(object):
             name = spec.name
             import_module = self.modules[name]
             if name not in self.modules:
-                raise ImportError("Failed to load module %s from %s" % (name, self.url))
+                raise ImportError("Failed to load module %s from %s" % (name, self.source))
             # Handle dynamic patching, if required
             if name not in self.bootcode_added:
-                hooked_module = self.hook(module, self.url)
+                hooked_module = self.hook(module, self.source)
                 if self._boot_code:
                     self.bootcode_added.append(name)
                     for boot_code in self._boot_code:
@@ -409,7 +414,7 @@ class ODImporter(object):
                 if self.modules[name]['filepath']:
                     self.path = module.__file__
                 else:
-                    self.path = f"{self.url}/{name}/"
+                    self.path = f"{self.source}/{name}/"
                 sys.modules[name] = module
                 if module.__file__.endswith(".pyc"):
                     try:
@@ -448,33 +453,33 @@ class ODImporter(object):
                     if mods:
                         if path + ".py" in mods:
                             self.modules[fullname] = {}
-                            self.modules[fullname]['content'] = self.proto_handler(self.url + "/" + path + ".py", path_cache=self.path_cache, config=self.config)
-                            self.modules[fullname]['filepath'] = self.url + "/" + path + ".py"
+                            self.modules[fullname]['content'] = self.proto_handler(self.source + "/" + path + ".py", path_cache=self.path_cache, config=self.config)
+                            self.modules[fullname]['filepath'] = self.source + "/" + path + ".py"
                             self.modules[fullname]['package'] = False
                             self.modules[fullname]['cExtension'] = False
                             return self
                         elif cExtensionImport and c_mods: # or mod.endswith('.so')): #not currently supporting *nix
                             self.modules[fullname] = {}
-                            self.modules[fullname]['content'] = self.proto_handler(self.url + "/" + c_mods[0], path_cache=self.path_cache, config=self.config)
-                            self.modules[fullname]['filepath'] = self.url + "/" + c_mods[0]
+                            self.modules[fullname]['content'] = self.proto_handler(self.source + "/" + c_mods[0], path_cache=self.path_cache, config=self.config)
+                            self.modules[fullname]['filepath'] = self.source + "/" + c_mods[0]
                             self.modules[fullname]['package'] = False
                             self.modules[fullname]['cExtension'] = True
                             return self
                         elif path + "/" in mods:
                             if path + "/__init__.py" not in self.path_cache:
                                 # Let's try to update the cache
-                                self.proto_handler(self.url, path=path + "/", path_cache=self.path_cache, config=self.config)
+                                self.proto_handler(self.source, path=path + "/", path_cache=self.path_cache, config=self.config)
                             if path + "/__init__.py" in self.path_cache:
                                 self.modules[fullname] = {}
-                                self.modules[fullname]['content'] = self.proto_handler(self.url + "/" + path + "/__init__.py", cache_update=False, path_cache=self.path_cache, config=self.config)
-                                self.modules[fullname]['filepath'] = self.url + "/" + path + "/__init__.py"
+                                self.modules[fullname]['content'] = self.proto_handler(self.source + "/" + path + "/__init__.py", cache_update=False, path_cache=self.path_cache, config=self.config)
+                                self.modules[fullname]['filepath'] = self.source + "/" + path + "/__init__.py"
                                 self.modules[fullname]['package'] = True
                                 self.modules[fullname]['cExtension'] = False
                                 return self
                         elif path + ".pyc" in mods:
                             self.modules[fullname] = {}
-                            self.modules[fullname]['content'] = self.proto_handler(self.url + "/" + pyc_mods[0], path_cache=self.path_cache, config=self.config)
-                            self.modules[fullname]['filepath'] = self.url + "/" + pyc_mods[0]
+                            self.modules[fullname]['content'] = self.proto_handler(self.source + "/" + pyc_mods[0], path_cache=self.path_cache, config=self.config)
+                            self.modules[fullname]['filepath'] = self.source + "/" + pyc_mods[0]
                             self.modules[fullname]['package'] = False
                             self.modules[fullname]['cExtension'] = False
                             return self
@@ -489,7 +494,7 @@ class ODImporter(object):
                 else:
                     if (("/".join(path.split("/")[:depth]) + "/" in self.path_cache) or ("/".join(path.split("/")[:depth]) in self.path_cache)):
                         # Try to update cache
-                        self.proto_handler(self.url, path="/".join(path.split("/")[:depth]) + "/", path_cache=self.path_cache, config=self.config)
+                        self.proto_handler(self.source, path="/".join(path.split("/")[:depth]) + "/", path_cache=self.path_cache, config=self.config)
                         if not [mod for mod in self.path_cache if mod.startswith("/".join(path.split("/")[:depth]))]:
                             # the path couldn't be matched at the current depth
                             logging.info("%s couldn't be matched at the current depth" % "/".join(path.split("/")[:depth]))
@@ -506,7 +511,7 @@ class ODImporter(object):
         Return:
             Returns module object with loaded/executed code within the module namespace"""
         if fullname not in self.modules:
-            raise ImportError("Failed to load module %s from %s" % (fullname, self.url))
+            raise ImportError("Failed to load module %s from %s" % (fullname, self.source))
 
         import_module = self.modules[fullname]
 
@@ -517,7 +522,7 @@ class ODImporter(object):
             mod.__file__ = import_module['filepath']
             mod.__path__ = "/".join(import_module['filepath'].split("/")[:-1]) + "/"
         else:
-            mod.__path__ = f"{self.url}/{fullname}/"
+            mod.__path__ = f"{self.source}/{fullname}/"
         if import_module['package']:
             mod.__package__ = fullname
         else:
@@ -532,7 +537,7 @@ class ODImporter(object):
 
         # Handle dynamic patching, if required
         if mod.__name__ not in self.bootcode_added:
-            hooked_module = self.hook(mod, self.url)
+            hooked_module = self.hook(mod, self.source)
             if self._boot_code:
                 self.bootcode_added.append(mod.__name__)
                 for boot_code in self._boot_code:
@@ -555,7 +560,7 @@ class ODImporter(object):
             if self.modules[fullname]['filepath']:
                 self.path = mod.__file__
             else:
-                self.path = f"{self.url}/{fullname}/"
+                self.path = f"{self.source}/{fullname}/"
             sys.modules[fullname] = mod
             if mod.__file__.endswith(".pyc"):
                 try:
@@ -579,35 +584,35 @@ class ODImporter(object):
         return mod
 
 
-def add_remote_source(url: str, INSECURE: bool=False, excludes: list=[], return_importer: bool=False, zip_password: bytes=None, config: dict={}):
+def add_remote_source(source: str, INSECURE: bool=False, excludes: list=[], return_importer: bool=False, zip_password: bytes=None, config: dict={}):
     """
     Description:
         Creates an ODImporter object and inserts it into the first entry of sys.meta_path
     Args:
-        url: Url of remote source
+        source: Url of remote source or bytes of an archive
         INSECURE: boolean which allows insecure protocols to be used for remote imports
         return_importer: boolean which determines if the importer object should be returned (used for internal calls)    
     """
-    importer = ODImporter(url, INSECURE, zip_password=zip_password, config=config)
+    importer = ODImporter(source, INSECURE, zip_password=zip_password, config=config)
     sys.meta_path.insert(0, importer)
     if return_importer:
         return importer
 
-def remove_remote_source(url: str):
+def remove_remote_source(source: str):
     """
     Description:
         Removes ODImporter object from sys.meta_path and the unique_proto_handler from sys.modules
     Args:
-        url: Url of remote source
+        source: Url of remote source or archive bytes md5 hash
     """
     for import_hook in sys.meta_path:
-        if 'url' in dir(import_hook) and import_hook.url == url:
+        if 'url' in dir(import_hook) and import_hook.source == source:
             try:
                 del sys.modules[import_hook.unique_proto_handler]
                 sys.meta_path.remove(import_hook)
                 return
             except Exception as e:
-                logging.warning("Failed to remove import hook or proto_handler for %s"% import_hook.url)
+                logging.warning("Failed to remove import hook or proto_handler for %s"% import_hook.source)
                 logging.warning(e)
 
 def add_github(user: str, repo: str, branch: str=None, git_type: str="git", api_key: str=None, http_provider: str=None, proxy: str=None, headers: dict={}, timeout=None):
@@ -655,7 +660,7 @@ def github(user: str, repo: str, branch: str=None, git_type: str="git", api_key:
     except ImportError as e:
         raise e
     finally:
-        remove_remote_source(import_hook.url)
+        remove_remote_source(import_hook.source)
 
 def add_gitlab(url: str, group: str, project: str, branch: str=None, git_type: str="git", api_key: str=None, http_provider: str=None, proxy: str=None, INSECURE=False, verify: bool=True, ca_file: str=None, ca_data: str=None, headers: dict={}, timeout=None):
     config = {
@@ -704,7 +709,7 @@ def gitlab(url: str, group: str, project: str, branch: str=None, git_type: str="
     except ImportError as e:
         raise e
     finally:
-        remove_remote_source(import_hook.url)
+        remove_remote_source(import_hook.source)
 
 def add_gitea(url: str, user: str, repo: str, branch: str=None, git_type: str="git", api_key: str=None, http_provider: str=None, proxy: str=None, INSECURE=False, verify: bool=True, ca_file: str=None, ca_data: str=None, headers: dict={}, timeout=None):
     config = {
@@ -753,7 +758,7 @@ def gitea(url: str, user: str, repo: str, branch: str=None, git_type: str="git",
     except ImportError as e:
         raise e
     finally:
-        remove_remote_source(import_hook.url)
+        remove_remote_source(import_hook.source)
 
 def add_pypi(package, http_provider: str=None, proxy: str=None, INSECURE=False, verify: bool=True, headers: dict={}, timeout=None):
     config = {
@@ -792,7 +797,7 @@ def pypi(package, http_provider: str=None, proxy: str=None, INSECURE=False, veri
     except ImportError as e:
         raise e
     finally:
-        remove_remote_source(import_hook.url)
+        remove_remote_source(import_hook.source)
 
 def add_dropbox(access_token: str, path: str="", http_provider: str=None, proxy: str=None, INSECURE=False, verify: bool=True, headers: dict={}, timeout=None):
     config = {
@@ -837,7 +842,7 @@ def dropbox(access_token: str, path: str="", http_provider: str=None, proxy: str
     except ImportError as e:
         raise e
     finally:
-        remove_remote_source(import_hook.url)
+        remove_remote_source(import_hook.source)
 
 def add_s3(bucket: str=None, region: str=None, access_key: str=None, secret_key: str=None, http_provider: str=None, proxy: str=None, headers: dict={}, timeout=None):
     config = {
@@ -878,7 +883,7 @@ def s3(bucket: str=None, region: str=None, access_key: str=None, secret_key: str
     except ImportError as e:
         raise e
     finally:
-        remove_remote_source(import_hook.url)
+        remove_remote_source(import_hook.source)
 
 @contextmanager
 def remote_source(url: str, INSECURE: bool=False, zip_password: bytes=None, config: dict={}):
@@ -894,4 +899,4 @@ def remote_source(url: str, INSECURE: bool=False, zip_password: bytes=None, conf
     except ImportError as e:
         raise e
     finally:
-        remove_remote_source(import_hook.url)
+        remove_remote_source(import_hook.source)
