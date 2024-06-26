@@ -175,7 +175,7 @@ class ODImporter(object):
         config: dictionary of configurations for the protocol handler
     """
 
-    def __init__(self, source: str|bytes, INSECURE: bool=False, ignores: list=None, excludes: list=[], zip_password: bytes=None, config={}):
+    def __init__(self, source, INSECURE: bool=False, ignores: list=None, excludes: list=[], zip_password: bytes=None, config={}):
         self.raw_python_import = raw_python_import
         self.uuid = str(uuid.uuid4().int)
         self.unique_proto_handler = 'proto_handler_' + self.uuid
@@ -584,7 +584,7 @@ class ODImporter(object):
         return mod
 
 
-def add_remote_source(source: str|bytes, INSECURE: bool=False, excludes: list=[], return_importer: bool=False, zip_password: bytes=None, config: dict={}):
+def add_remote_source(source, INSECURE: bool=False, excludes: list=[], return_importer: bool=False, zip_password: bytes=None, config: dict={}):
     """
     Description:
         Creates an ODImporter object and inserts it into the first entry of sys.meta_path
@@ -606,9 +606,10 @@ def remove_remote_source(source: str):
         source: Url of remote source or archive bytes md5 hash
     """
     for import_hook in sys.meta_path:
-        if 'url' in dir(import_hook) and import_hook.source == source:
+        if 'source' in dir(import_hook) and import_hook.source == source:
             try:
-                del sys.modules[import_hook.unique_proto_handler]
+                if import_hook.unique_proto_handler in sys.modules:
+                    del sys.modules[import_hook.unique_proto_handler]
                 sys.meta_path.remove(import_hook)
                 return
             except Exception as e:
@@ -886,7 +887,7 @@ def s3(bucket: str=None, region: str=None, access_key: str=None, secret_key: str
         remove_remote_source(import_hook.source)
 
 @contextmanager
-def remote_source(source: str|bytes, INSECURE: bool=False, zip_password: bytes=None, config: dict={}):
+def remote_source(source, INSECURE: bool=False, zip_password: bytes=None, config: dict={}):
     """
     Description:
         Allows for temporary import hooking to run imports/commands within a limited namespace scope
